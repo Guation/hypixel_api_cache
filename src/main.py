@@ -143,7 +143,6 @@ def main():
     app = asyncio.run(create_app())
     loop = asyncio.new_event_loop()
     loop.create_task(fetch_from_upstream(os.environ["HYPIXEL"]))
-    loop.create_task(fetch_from_upstream(os.environ["HYPIXEL"]))
     web.run_app(app, host='127.0.0.1', port=8001, loop=loop, access_log=None)
 
 if __name__ == '__main__':
