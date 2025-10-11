@@ -59,21 +59,21 @@ async def fetch_from_upstream(key: str):
         try:
             uuid = await FETCH_QUEUE.get()
             status, data, headers = await http_get(f"https://api.hypixel.net/v2/player?uuid={uuid}", headers={"API-Key": key})
+            info("ratelimit-remaining: %s", headers.get("ratelimit-remaining"))
             if status == 200:
                 data = json.loads(data)
                 data["name"] = data.get("player", {}).get("displayname")
                 data["timestamp"] = int(time.time())
                 await put_cached_data(uuid, json.dumps(data), 1800)
-                warning("player %s hypixel api name %s", uuid, data["name"])
-            else:
-                if status != 429 and status != None:
-                    error("player %s hypixel api fail [%s]", uuid, status)
-                else:
-                    await FETCH_QUEUE.put(uuid)
-                    if headers.get("ratelimit-remaining") == 0:
-                        warning("ratelimit %s", headers.get("ratelimit-reset"))
-                        await asyncio.sleep(headers.get("ratelimit-reset"))
+                info("player %s hypixel api name %s", uuid, data["name"])
                 await asyncio.sleep(1)
+            else:
+                if status == 429:
+                    await FETCH_QUEUE.put(uuid)
+                    warning("wait ratelimit-reset %s", headers.get("ratelimit-reset"))
+                else:
+                    error("player %s hypixel api fail [%s]", uuid, status)
+                await asyncio.sleep(10)
                 continue
         except Exception:
             error(traceback.format_exc())
