@@ -11,12 +11,6 @@ import uuid as uuid_lib
 DB_PATH = 'hypixel.db'
 FETCH_QUEUE = asyncio.Queue()
 
-try:
-    from ip_pool import Resolver
-except:
-    Resolver = None
-
-
 async def setup_database():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('PRAGMA journal_mode=WAL')
@@ -30,9 +24,9 @@ async def setup_database():
         ''')
         await db.commit()
 
-async def http_get(url: str, headers = None, resolver = None):
+async def http_get(url: str, headers = None):
     try:
-        async with aiohttp.ClientSession(headers=headers, connector=aiohttp.TCPConnector(resolver=resolver, timeout_ceil_threshold=1)) as session:
+        async with aiohttp.ClientSession(headers=headers, connector=aiohttp.TCPConnector(timeout_ceil_threshold=1)) as session:
             async with session.get(url) as response:
                 info(response.headers)
                 return response.status, await response.text()
@@ -65,35 +59,13 @@ async def fetch_from_upstream(key: str):
     while True:
         try:
             uuid = await FETCH_QUEUE.get()
-            if not (await get_cached_data(uuid))[1]:
-                continue
-            warning("start query %s", uuid)
-            status, data = await http_get(f"https://minecraft.202110510.xyz/uuid/{uuid}", resolver=Resolver)
-            if status == 404:
-                await put_cached_data(uuid, json.dumps({"name": None, "timestamp": int(time.time())}), 1800)
-                error("player %s not found [%s]", uuid, status)
-                continue
-            elif status == 200:
-                data = json.loads(data)
-                player_name = data["name"]
-                warning("player %s name %s", uuid, player_name)
-            else:
-                if status != 429 and status != None:
-                    error("player %s mojang api error [%s]", uuid, status)
-                else:
-                    await FETCH_QUEUE.put(uuid)
-                await asyncio.sleep(1)
-                continue
             status, data = await http_get(f"https://api.hypixel.net/v2/player?uuid={uuid}", headers={"API-Key": key})
             if status == 200:
                 data = json.loads(data)
-                data["name"] = player_name
+                data["name"] = data.get("player", {}).get("displayname")
                 data["timestamp"] = int(time.time())
                 await put_cached_data(uuid, json.dumps(data), 1800)
-                if data["player"] != None:
-                    warning("player %s hypixel api name %s", uuid, data["player"]["displayname"])
-                else:
-                    warning("player %s hypixel api name %s", uuid, None)
+                warning("player %s hypixel api name %s", uuid, data["name"])
             else:
                 if status != 429 and status != None:
                     error("player %s hypixel api fail [%s]", uuid, status)
