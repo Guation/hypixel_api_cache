@@ -3,7 +3,7 @@
 
 __author__ = "Guation"
 
-import aiosqlite, aiohttp, asyncio, os, json, time, traceback, ssl
+import aiosqlite, aiohttp, asyncio, os, json, time, traceback, ssl, socket
 from logging import debug, info, warning, error, basicConfig, DEBUG, INFO, WARN
 from aiohttp import web
 import uuid as uuid_lib
@@ -26,7 +26,7 @@ async def setup_database():
 
 async def http_get(url: str, headers = None):
     try:
-        async with aiohttp.ClientSession(headers=headers, connector=aiohttp.TCPConnector(timeout_ceil_threshold=1)) as session:
+        async with aiohttp.ClientSession(headers=headers, connector=aiohttp.TCPConnector(timeout_ceil_threshold=1, family=socket.AF_INET)) as session:
             async with session.get(url) as response:
                 return response.status, await response.text(), response.headers
     except Exception:
@@ -58,6 +58,9 @@ async def fetch_from_upstream(key: str):
     while True:
         try:
             uuid = await FETCH_QUEUE.get()
+            if not (await get_cached_data(uuid))[1]:
+                continue
+            info("start query %s", uuid)
             status, data, headers = await http_get(f"https://api.hypixel.net/v2/player?uuid={uuid}", headers={"API-Key": key})
             info("ratelimit-remaining: %s", headers.get("ratelimit-remaining"))
             if status == 200:
@@ -66,7 +69,7 @@ async def fetch_from_upstream(key: str):
                 data["timestamp"] = int(time.time())
                 await put_cached_data(uuid, json.dumps(data), 1800)
                 info("player %s hypixel api name %s", uuid, data["name"])
-                await asyncio.sleep(1)
+                await asyncio.sleep(1.1)
             else:
                 if status == 429:
                     await FETCH_QUEUE.put(uuid)
