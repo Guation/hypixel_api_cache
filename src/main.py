@@ -28,8 +28,7 @@ async def http_get(url: str, headers = None):
     try:
         async with aiohttp.ClientSession(headers=headers, connector=aiohttp.TCPConnector(timeout_ceil_threshold=1)) as session:
             async with session.get(url) as response:
-                info(response.headers)
-                return response.status, await response.text()
+                return response.status, await response.text(), response.headers
     except Exception:
         error(traceback.format_exc())
         return None, None
@@ -59,7 +58,7 @@ async def fetch_from_upstream(key: str):
     while True:
         try:
             uuid = await FETCH_QUEUE.get()
-            status, data = await http_get(f"https://api.hypixel.net/v2/player?uuid={uuid}", headers={"API-Key": key})
+            status, data, headers = await http_get(f"https://api.hypixel.net/v2/player?uuid={uuid}", headers={"API-Key": key})
             if status == 200:
                 data = json.loads(data)
                 data["name"] = data.get("player", {}).get("displayname")
@@ -71,6 +70,9 @@ async def fetch_from_upstream(key: str):
                     error("player %s hypixel api fail [%s]", uuid, status)
                 else:
                     await FETCH_QUEUE.put(uuid)
+                    if headers.get("ratelimit-remaining") == 0:
+                        warning("ratelimit %s", headers.get("ratelimit-reset"))
+                        await asyncio.sleep(headers.get("ratelimit-reset"))
                 await asyncio.sleep(1)
                 continue
         except Exception:
