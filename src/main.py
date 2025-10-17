@@ -8,8 +8,17 @@ from logging import debug, info, warning, error, basicConfig, DEBUG, INFO, WARN
 from aiohttp import web
 import uuid as uuid_lib
 
+class fetch_data_t():
+    def __init__(self, uuid: str, user_name: str, user_uuid: str):
+        self.uuid = uuid_lib.UUID(uuid)
+        self.user_name = user_name
+        self.user_uuid = uuid_lib.UUID(user_uuid)
+
+    def __str__(self):
+        return str(self.uuid)
+
 DB_PATH = 'hypixel.db'
-FETCH_QUEUE = asyncio.Queue()
+FETCH_QUEUE: asyncio.Queue[fetch_data_t] = asyncio.Queue()
 
 async def setup_database():
     async with aiosqlite.connect(DB_PATH) as db:
@@ -33,11 +42,11 @@ async def http_get(url: str, headers = None):
         error(traceback.format_exc())
         return None, None
 
-async def get_cached_data(uuid: str):
+async def get_cached_data(uuid: fetch_data_t):
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT data, expired FROM player_cache WHERE uuid = ?",
-            (uuid,)
+            (str(uuid),)
         )
         row = await cursor.fetchone()
         await cursor.close()
@@ -46,11 +55,11 @@ async def get_cached_data(uuid: str):
             return data, bool(expired < int(time.time()))
     return None, True
 
-async def put_cached_data(uuid: str, data: str, expired: int):
+async def put_cached_data(uuid: fetch_data_t, data: str, expired: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR REPLACE INTO player_cache (uuid, data, expired) VALUES (?, ?, ?)",
-            (uuid, data, int(time.time()) + expired)
+            (str(uuid), data, int(time.time()) + expired)
         )
         await db.commit()
 
@@ -60,7 +69,7 @@ async def fetch_from_upstream(key: str):
             uuid = await FETCH_QUEUE.get()
             if not (await get_cached_data(uuid))[1]:
                 continue
-            info("start query %s", uuid)
+            info("start query %s from %s(%s)", uuid, uuid.user_name, uuid.user_uuid)
             status, data, headers = await http_get(f"https://api.hypixel.net/v2/player?uuid={uuid}", headers={"API-Key": key})
             info("ratelimit-remaining: %s", headers.get("ratelimit-remaining"))
             if status == 200:
@@ -85,16 +94,22 @@ async def fetch_from_upstream(key: str):
 
 async def handle_request(request: web.Request):
     try:
-        uuid = str(uuid_lib.UUID(request.match_info.get('uuid')))
-    except (ValueError, AttributeError):
+        uuid = fetch_data_t(request.match_info['uuid'], request.headers["User-Name"], request.headers['User-Uuid'])
+    except ValueError:
         return web.Response(
             text='{"error": "Invalid UUID format"}',
             status=400,
             content_type='application/json'
         )
+    except (AttributeError, KeyError):
+        return web.Response(
+            text='{"error": "Incomplete request"}',
+            status=400,
+            content_type='application/json'
+        )
     
     cached_data, expired = await get_cached_data(uuid)
-    if expired:
+    if expired and request.headers.get("Protocol-Version") == "20251016":
         await FETCH_QUEUE.put(uuid)
     if cached_data:
         return web.Response(
@@ -118,7 +133,7 @@ async def create_app():
 def main():
     basicConfig(
         level=INFO,
-        format='[%(levelname)8s] %(asctime)s <%(module)s.%(funcName)s>:%(lineno)d\n[%(levelname)8s] %(message)s')
+        format='[%(levelname)8s | %(asctime)s] %(message)s')
     app = asyncio.run(create_app())
     loop = asyncio.new_event_loop()
     loop.create_task(fetch_from_upstream(os.environ["HYPIXEL"]))
