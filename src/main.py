@@ -74,7 +74,7 @@ async def fetch_from_upstream(key: str):
             info("ratelimit-remaining: %s", headers.get("ratelimit-remaining"))
             if status == 200:
                 data = json.loads(data)
-                data["name"] = data.get("player", {}).get("displayname")
+                data["name"] = None if data["player"] == None else data["player"]["displayname"]
                 data["timestamp"] = int(time.time())
                 await put_cached_data(uuid, json.dumps(data), 1800)
                 info("player %s hypixel api name %s", uuid, data["name"])
@@ -109,7 +109,7 @@ async def handle_request(request: web.Request):
         )
     
     cached_data, expired = await get_cached_data(uuid)
-    if expired and request.headers.get("Protocol-Version") == "20251016":
+    if expired and request.headers.get("Protocol-Version") == "20251018":
         await FETCH_QUEUE.put(uuid)
     if cached_data:
         return web.Response(
