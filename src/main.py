@@ -78,7 +78,7 @@ async def fetch_from_upstream(key: str):
                 data["timestamp"] = int(time.time())
                 await put_cached_data(uuid, json.dumps(data), 1800)
                 info("player %s hypixel api name %s", uuid, data["name"])
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.1)
             else:
                 if status == 429:
                     await FETCH_QUEUE.put(uuid)
@@ -91,6 +91,7 @@ async def fetch_from_upstream(key: str):
                 continue
         except Exception:
             error(traceback.format_exc())
+            await asyncio.sleep(60)
 
 async def handle_request(request: web.Request):
     try:
