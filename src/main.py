@@ -86,7 +86,7 @@ async def fetch_from_upstream(key: str):
                     warning("wait ratelimit-reset %s", headers.get("ratelimit-reset"))
                     await asyncio.sleep(int(headers.get("ratelimit-reset")) + 1)
                 else:
-                    error("player %s hypixel api fail [%s]", uuid, status)
+                    error("player %s hypixel api fail [%s] [%s]", uuid, status, data)
                     await asyncio.sleep(10)
                 continue
         except Exception:
