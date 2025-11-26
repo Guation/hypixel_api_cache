@@ -67,6 +67,8 @@ async def fetch_from_upstream(key: str):
     while True:
         try:
             uuid = await FETCH_QUEUE.get()
+            if not key:
+                continue
             if not (await get_cached_data(uuid))[1]:
                 continue
             info("start query %s from %s(%s)", uuid, uuid.user_name, uuid.user_uuid)
