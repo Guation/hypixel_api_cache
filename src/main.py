@@ -67,8 +67,6 @@ async def fetch_from_upstream(key: str):
     while True:
         try:
             uuid = await FETCH_QUEUE.get()
-            if not key:
-                continue
             if not (await get_cached_data(uuid))[1]:
                 continue
             info("start query %s from %s(%s)", uuid, uuid.user_name, uuid.user_uuid)
@@ -95,7 +93,7 @@ async def fetch_from_upstream(key: str):
             error(traceback.format_exc())
             await asyncio.sleep(60)
 
-async def handle_request(request: web.Request):
+async def handle_request(request: web.Request, key: str):
     try:
         uuid = fetch_data_t(request.match_info['uuid'], request.headers["User-Name"], request.headers['User-Uuid'])
     except ValueError:
@@ -112,34 +110,45 @@ async def handle_request(request: web.Request):
         )
     
     cached_data, expired = await get_cached_data(uuid)
-    if expired and request.headers.get("Protocol-Version") == "20251018":
+    if expired and request.headers.get("Protocol-Version") == "20251018" and key:
         await FETCH_QUEUE.put(uuid)
     if cached_data:
         return web.Response(
             text=cached_data,
             content_type='application/json'
         )
-    else:
+    elif key:
         return web.Response(
             text='{"error": "Waiting for data"}',
             status=202,
             content_type='application/json'
         )
+    else:
+        return web.Response(
+            text='{"error": "No API key configured"}',
+            status=403,
+            content_type='application/json'
+        )
 
-async def create_app():
+async def create_app(key: str):
     if not os.path.isfile(DB_PATH):
         await setup_database()
     app = web.Application()
-    app.router.add_get('/{uuid}', handle_request)
+    async def handler(request):
+        return await handle_request(request, key)
+    app.router.add_get('/{uuid}', handler)
     return app
 
 def main():
     basicConfig(
         level=INFO,
         format='[%(levelname)8s | %(asctime)s] %(message)s')
-    app = asyncio.run(create_app())
+    api_key = os.environ.get("HYPIXEL")
+    if not api_key:
+        warning("No API key configured")
+    app = asyncio.run(create_app(api_key))
     loop = asyncio.new_event_loop()
-    loop.create_task(fetch_from_upstream(os.environ["HYPIXEL"]))
+    loop.create_task(fetch_from_upstream(api_key))
     web.run_app(app, host='127.0.0.1', port=8001, loop=loop, access_log=None)
 
 if __name__ == '__main__':
