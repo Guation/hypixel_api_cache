@@ -76,7 +76,7 @@ async def fetch_from_upstream(key: str):
                 data = json.loads(data)
                 data["name"] = None if data["player"] == None else data["player"]["displayname"]
                 data["timestamp"] = int(time.time())
-                await put_cached_data(uuid, json.dumps(data), 1800)
+                await put_cached_data(uuid, json.dumps(data), 3600)
                 info("player %s hypixel api name %s", uuid, data["name"])
                 await asyncio.sleep(0.1)
             else:
