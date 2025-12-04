@@ -3,10 +3,14 @@
 
 __author__ = "Guation"
 
-import aiosqlite, aiohttp, asyncio, os, json, time, traceback, ssl, socket
+import aiosqlite, aiohttp, asyncio, os, json, time, traceback, socket
 from logging import debug, info, warning, error, basicConfig, DEBUG, INFO, WARN
 from aiohttp import web
 import uuid as uuid_lib
+import zstandard as zstd
+
+CCTX = zstd.ZstdCompressor(level=22)
+DCTX = zstd.ZstdDecompressor()
 
 class fetch_data_t():
     def __init__(self, uuid: str, user_name: str, user_uuid: str):
@@ -17,7 +21,7 @@ class fetch_data_t():
     def __str__(self):
         return str(self.uuid)
 
-DB_PATH = 'hypixel.db'
+DB_PATH = 'hypixel_zstd.db'
 FETCH_QUEUE: asyncio.Queue[fetch_data_t] = asyncio.Queue()
 
 async def setup_database():
@@ -27,7 +31,7 @@ async def setup_database():
         await db.execute('''
             CREATE TABLE IF NOT EXISTS player_cache (
                 uuid TEXT PRIMARY KEY,
-                data TEXT NOT NULL,
+                data BLOB NOT NULL,
                 expired INTEGER NOT NULL
             )
         ''')
@@ -42,7 +46,7 @@ async def http_get(url: str, headers = None):
         error(traceback.format_exc())
         return None, None
 
-async def get_cached_data(uuid: fetch_data_t):
+async def get_cached_data(uuid: fetch_data_t) -> tuple[bytes | None, bool]:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
             "SELECT data, expired FROM player_cache WHERE uuid = ?",
@@ -52,10 +56,10 @@ async def get_cached_data(uuid: fetch_data_t):
         await cursor.close()
         if row:
             data, expired = row
-            return data, bool(expired < int(time.time()))
+            return data, expired < time.time()
     return None, True
 
-async def put_cached_data(uuid: fetch_data_t, data: str, expired: int):
+async def put_cached_data(uuid: fetch_data_t, data: bytes, expired: int):
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute(
             "INSERT OR REPLACE INTO player_cache (uuid, data, expired) VALUES (?, ?, ?)",
@@ -76,7 +80,7 @@ async def fetch_from_upstream(key: str):
                 data = json.loads(data)
                 data["name"] = None if data["player"] == None else data["player"]["displayname"]
                 data["timestamp"] = int(time.time())
-                await put_cached_data(uuid, json.dumps(data), 3600)
+                await put_cached_data(uuid, CCTX.compress(json.dumps(data).encode("utf-8")), 3600)
                 info("player %s hypixel api name %s", uuid, data["name"])
                 await asyncio.sleep(0.1)
             else:
@@ -113,10 +117,18 @@ async def handle_request(request: web.Request, key: str):
     if expired and request.headers.get("Protocol-Version") == "20251018" and key:
         await FETCH_QUEUE.put(uuid)
     if cached_data:
-        return web.Response(
-            text=cached_data,
-            content_type='application/json'
-        )
+        try:
+            return web.Response(
+                text=DCTX.decompress(cached_data).decode("utf-8"),
+                content_type='application/json'
+            )
+        except Exception:
+            error("Decompress player(%s) data fail", uuid, stack_info=True)
+            return web.Response(
+                text='{"error": "Decompress player data fail"}',
+                status=403,
+                content_type='application/json'
+            )
     elif key:
         return web.Response(
             text='{"error": "Waiting for data"}',

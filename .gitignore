@@ -1,3 +1,4 @@
 /.vscode/
 /run.sh
 hypixel.db
+hypixel_zstd.db
