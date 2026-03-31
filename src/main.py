@@ -3,7 +3,7 @@
 
 __author__ = "Guation"
 
-import aiosqlite, aiohttp, asyncio, os, json, time, traceback, socket
+import aiosqlite, aiohttp, asyncio, os, orjson, time, traceback, socket
 from logging import debug, info, warning, error, basicConfig, DEBUG, INFO, WARN
 from aiohttp import web
 import uuid as uuid_lib
@@ -41,7 +41,7 @@ async def http_get(url: str, headers = None):
     try:
         async with aiohttp.ClientSession(headers=headers, connector=aiohttp.TCPConnector(timeout_ceil_threshold=1, family=socket.AF_INET)) as session:
             async with session.get(url) as response:
-                return response.status, await response.text(), response.headers
+                return response.status, await response.read(), response.headers
     except Exception:
         error(traceback.format_exc())
         return None, None
@@ -77,10 +77,10 @@ async def fetch_from_upstream(key: str):
             status, data, headers = await http_get(f"https://api.hypixel.net/v2/player?uuid={uuid}", headers={"API-Key": key})
             info("ratelimit-remaining: %s", headers.get("ratelimit-remaining"))
             if status == 200:
-                data = json.loads(data)
+                data = orjson.loads(data)
                 data["name"] = None if data["player"] == None else data["player"]["displayname"]
                 data["timestamp"] = int(time.time())
-                await put_cached_data(uuid, CCTX.compress(json.dumps(data).encode("utf-8")), 3600)
+                await put_cached_data(uuid, CCTX.compress(orjson.dumps(data)), 3600)
                 info("player %s hypixel api name %s", uuid, data["name"])
                 await asyncio.sleep(0.1)
             else:
@@ -97,7 +97,7 @@ async def fetch_from_upstream(key: str):
             error(traceback.format_exc())
             await asyncio.sleep(60)
 
-async def handle_request(request: web.Request, key: str):
+async def uuid_handle(request: web.Request, key: str):
     try:
         uuid = fetch_data_t(request.match_info['uuid'], request.headers["User-Name"], request.headers['User-Uuid'])
     except ValueError:
@@ -120,7 +120,8 @@ async def handle_request(request: web.Request, key: str):
         try:
             return web.Response(
                 text=DCTX.decompress(cached_data).decode("utf-8"),
-                content_type='application/json'
+                content_type='application/json',
+                headers={"expired": str(expired)}
             )
         except Exception:
             error("Decompress player(%s) data fail", uuid, stack_info=True)
@@ -142,13 +143,20 @@ async def handle_request(request: web.Request, key: str):
             content_type='application/json'
         )
 
+async def root_handle(request: web.Request):
+    return web.Response(
+        text=orjson.dumps({"timestamp": int(time.time())}).decode("utf-8"),
+        content_type='application/json'
+    )
+
 async def create_app(key: str):
     if not os.path.isfile(DB_PATH):
         await setup_database()
     app = web.Application()
     async def handler(request):
-        return await handle_request(request, key)
+        return await uuid_handle(request, key)
     app.router.add_get('/{uuid}', handler)
+    app.router.add_get('/', root_handle)
     return app
 
 def main():
