@@ -17,24 +17,36 @@ class fetch_data_t():
         self.uuid = uuid_lib.UUID(uuid)
         self.user_name = user_name
         self.user_uuid = uuid_lib.UUID(user_uuid)
+        self.bytes = self.uuid.bytes
 
     def __str__(self):
         return str(self.uuid)
 
-DB_PATH = 'hypixel_zstd.db'
+DB_PATH = 'hypixel_split.db'
 FETCH_QUEUE: asyncio.Queue[fetch_data_t] = asyncio.Queue()
 
 async def setup_database():
     async with aiosqlite.connect(DB_PATH) as db:
         await db.execute('PRAGMA journal_mode=WAL')
         await db.execute('PRAGMA synchronous=NORMAL')
+        await db.execute('PRAGMA foreign_keys=ON')
+
         await db.execute('''
-            CREATE TABLE IF NOT EXISTS player_cache (
-                uuid TEXT PRIMARY KEY,
-                data BLOB NOT NULL,
+            CREATE TABLE IF NOT EXISTS players (
+                id INTEGER PRIMARY KEY,
+                uuid BLOB(16) NOT NULL UNIQUE,
                 expired INTEGER NOT NULL
             )
         ''')
+
+        await db.execute('''
+            CREATE TABLE IF NOT EXISTS player_data (
+                id INTEGER PRIMARY KEY,
+                data BLOB NOT NULL,
+                FOREIGN KEY(id) REFERENCES players(id) ON DELETE CASCADE
+            )
+        ''')
+
         await db.commit()
 
 async def http_get(url: str, headers = None):
@@ -46,32 +58,67 @@ async def http_get(url: str, headers = None):
         error(traceback.format_exc())
         return None, None
 
-async def get_cached_data(uuid: fetch_data_t) -> tuple[bytes | None, bool]:
+async def get_cached_expired(uuid: fetch_data_t) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT data, expired FROM player_cache WHERE uuid = ?",
-            (str(uuid),)
+            "SELECT id, expired FROM players WHERE uuid = ?",
+            (uuid.bytes,)
         )
         row = await cursor.fetchone()
         await cursor.close()
+
+        if row:
+            expired = row[0]
+            return expired < time.time()
+
+    return True
+
+async def get_cached_data(uuid: fetch_data_t) -> tuple[bytes | None, bool]:
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute("""
+            SELECT d.data, p.expired
+            FROM players p
+            JOIN player_data d ON p.id = d.id
+            WHERE p.uuid = ?
+        """, (uuid.bytes,))
+
+        row = await cursor.fetchone()
+        await cursor.close()
+
         if row:
             data, expired = row
             return data, expired < time.time()
+
     return None, True
 
 async def put_cached_data(uuid: fetch_data_t, data: bytes, expired: int):
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT OR REPLACE INTO player_cache (uuid, data, expired) VALUES (?, ?, ?)",
-            (str(uuid), data, int(time.time()) + expired)
-        )
+        await db.execute("PRAGMA foreign_keys=ON")
+        await db.execute("BEGIN")
+
+        cursor = await db.execute("""
+            INSERT INTO players (uuid, expired)
+            VALUES (?, ?)
+            ON CONFLICT(uuid) DO UPDATE SET expired = excluded.expired
+            RETURNING id
+        """, (uuid.bytes, int(time.time()) + expired))
+
+        player_id = (await cursor.fetchone())[0]
+        await cursor.close()
+
+        await db.execute("""
+            INSERT INTO player_data (id, data)
+            VALUES (?, ?)
+            ON CONFLICT(id) DO UPDATE SET data = excluded.data
+        """, (player_id, data))
+
         await db.commit()
 
 async def fetch_from_upstream(key: str):
     while True:
         try:
             uuid = await FETCH_QUEUE.get()
-            if not (await get_cached_data(uuid))[1]:
+            if not await get_cached_expired(uuid):
                 continue
             info("start query %s from %s(%s)", uuid, uuid.user_name, uuid.user_uuid)
             status, data, headers = await http_get(f"https://api.hypixel.net/v2/player?uuid={uuid}", headers={"API-Key": key})
@@ -97,45 +144,60 @@ async def fetch_from_upstream(key: str):
             error(traceback.format_exc())
             await asyncio.sleep(60)
 
-async def uuid_handle(request: web.Request, key: str):
+def get_fetch_data(request: web.Request):
     try:
-        uuid = fetch_data_t(request.match_info['uuid'], request.headers["User-Name"], request.headers['User-Uuid'])
+        return None, fetch_data_t(request.match_info['uuid'], request.headers["User-Name"], request.headers['User-Uuid'])
     except ValueError:
         return web.Response(
             text='{"error": "Invalid UUID format"}',
             status=400,
             content_type='application/json'
-        )
+        ), None
     except (AttributeError, KeyError):
         return web.Response(
             text='{"error": "Incomplete request"}',
             status=400,
             content_type='application/json'
+        ), None
+
+def send_player_data(cached_data: bytes, expired: bool, uuid: fetch_data_t):
+    try:
+        return web.Response(
+            body=DCTX.decompress(cached_data),
+            content_type='application/json',
+            headers={"expired": str(expired)}
         )
-    
+    except Exception:
+        error("Decompress player(%s) data fail", uuid, stack_info=True)
+        return web.Response(
+            text='{"error": "Decompress player data fail"}',
+            status=403,
+            content_type='application/json'
+        )
+
+async def key_handle(request: web.Request):
+    response, uuid = get_fetch_data(request)
+    if response:
+        return response
     cached_data, expired = await get_cached_data(uuid)
-    if expired and request.headers.get("Protocol-Version") == "20251018" and key:
+    if expired and request.headers.get("Protocol-Version") == "20251018":
         await FETCH_QUEUE.put(uuid)
     if cached_data:
-        try:
-            return web.Response(
-                text=DCTX.decompress(cached_data).decode("utf-8"),
-                content_type='application/json',
-                headers={"expired": str(expired)}
-            )
-        except Exception:
-            error("Decompress player(%s) data fail", uuid, stack_info=True)
-            return web.Response(
-                text='{"error": "Decompress player data fail"}',
-                status=403,
-                content_type='application/json'
-            )
-    elif key:
+        return send_player_data(cached_data, expired, uuid)
+    else:
         return web.Response(
             text='{"error": "Waiting for data"}',
             status=202,
             content_type='application/json'
         )
+
+async def nokey_handle(request: web.Request):
+    response, uuid = get_fetch_data(request)
+    if response:
+        return response
+    cached_data, expired = await get_cached_data(uuid)
+    if cached_data:
+        return send_player_data(cached_data, False, uuid)
     else:
         return web.Response(
             text='{"error": "No API key configured"}',
@@ -145,7 +207,7 @@ async def uuid_handle(request: web.Request, key: str):
 
 async def root_handle(request: web.Request):
     return web.Response(
-        text=orjson.dumps({"timestamp": int(time.time())}).decode("utf-8"),
+        body=orjson.dumps({"timestamp": int(time.time())}),
         content_type='application/json'
     )
 
@@ -153,9 +215,10 @@ async def create_app(key: str):
     if not os.path.isfile(DB_PATH):
         await setup_database()
     app = web.Application()
-    async def handler(request):
-        return await uuid_handle(request, key)
-    app.router.add_get('/{uuid}', handler)
+    if key:
+        app.router.add_get('/{uuid}', key_handle)
+    else:
+        app.router.add_get('/{uuid}', nokey_handle)
     app.router.add_get('/', root_handle)
     return app
 
@@ -168,7 +231,8 @@ def main():
         warning("No API key configured")
     app = asyncio.run(create_app(api_key))
     loop = asyncio.new_event_loop()
-    loop.create_task(fetch_from_upstream(api_key))
+    if api_key:
+        loop.create_task(fetch_from_upstream(api_key))
     web.run_app(app, host='127.0.0.1', port=8001, loop=loop, access_log=None)
 
 if __name__ == '__main__':
