@@ -61,7 +61,7 @@ async def http_get(url: str, headers = None):
 async def get_cached_expired(uuid: fetch_data_t) -> bool:
     async with aiosqlite.connect(DB_PATH) as db:
         cursor = await db.execute(
-            "SELECT id, expired FROM players WHERE uuid = ?",
+            "SELECT expired FROM players WHERE uuid = ?",
             (uuid.bytes,)
         )
         row = await cursor.fetchone()
