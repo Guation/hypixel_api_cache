@@ -222,6 +222,12 @@ async def create_app(key: str):
     app.router.add_get('/', root_handle)
     return app
 
+async def keepalive(user: fetch_data_t):
+    while True:
+        info("start keepalive")
+        await FETCH_QUEUE.put(user)
+        await asyncio.sleep(7 * 24 * 60 * 60)
+
 def main():
     basicConfig(
         level=INFO,
@@ -233,6 +239,9 @@ def main():
     loop = asyncio.new_event_loop()
     if api_key:
         loop.create_task(fetch_from_upstream(api_key))
+    keepalive_uuid = os.environ.get("KEEPALIVE_UUID")
+    if keepalive_uuid:
+        loop.create_task(keepalive(fetch_data_t(keepalive_uuid, "keepalive_user", keepalive_uuid)))
     web.run_app(app, host='127.0.0.1', port=8001, loop=loop, access_log=None)
 
 if __name__ == '__main__':
